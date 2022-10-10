@@ -114,6 +114,7 @@ The parameters are as follows:
 This is a downgrade-attack to test whether a device automatically connects to a WPA2-Access Point (AP). Here a WPA2-AP with the same SSID as a WPA3-transition-mode AP is set up. The SSID has to be set to the SSID of a known WPA3-transition-mode AP. If the attack succeeds the handshake messages will be saved to a .pcap file for potential brute-force attacks. 
 
 You can start the attack:
+	
 	./downgradeWPA3.py ssid interace_AP interface_sniff
 	
 The parameters are as follows:
