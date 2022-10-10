@@ -109,3 +109,18 @@ The parameters are as follows:
 
 - `interface_inject`: this is the wireless network card that will sniff and inject commit-frames
 
+### 3.1.3 Downgrade-Attack for WPA3-Transition-Mode APs
+
+This is a downgrade-attack to test whether a device automatically connects to a WPA2-Access Point (AP). Here a WPA2-AP with the same SSID as a WPA3-transition-mode AP is set up. The SSID has to be set to the SSID of a known WPA3-transition-mode AP. If the attack succeeds the handshake messages will be saved to a .pcap file for potential brute-force attacks. 
+
+You can start the attack:
+	./downgradeWPA3.py ssid interace_AP interface_sniff
+	
+The parameters are as follows:
+
+- `ssid`: this is the SSID of a known WPA3-Transition-Mode AP, a WPA2-AP with this SSID will be set up
+
+- `interface_AP`: this is the wireless network card that will advertise a WPA3-AP, make sure the wireless network card is compatible with WPA3
+
+- `interface_inject`: this is the wireless network card that will sniff and inject commit-frames
+	
